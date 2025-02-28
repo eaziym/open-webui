@@ -1,0 +1,1 @@
+<link crossorigin="anonymous" rel="icon" href="{WEBUI_STATIC_URL}/static/favicon.png" /> 

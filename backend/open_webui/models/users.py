@@ -1,8 +1,11 @@
 import time
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 
 from open_webui.internal.db import Base, JSONField, get_db
 
+# Forward references
+if TYPE_CHECKING:
+    from open_webui.models.integrations import IntegrationModel
 
 from open_webui.models.chats import Chats
 from open_webui.models.groups import Groups
@@ -10,6 +13,7 @@ from open_webui.models.groups import Groups
 
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy import BigInteger, Column, String, Text
+from sqlalchemy.orm import relationship
 
 ####################
 # User DB Schema
@@ -34,6 +38,10 @@ class User(Base):
     info = Column(JSONField, nullable=True)
 
     oauth_sub = Column(Text, unique=True)
+    
+    # Relationships
+    # Using string reference to break circular dependency
+    integrations = relationship("IntegrationModel", back_populates="user", cascade="all, delete-orphan", lazy="selectin", post_update=True)
 
 
 class UserSettings(BaseModel):

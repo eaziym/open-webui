@@ -161,7 +161,7 @@ Encountering connection issues? Our [Open WebUI Documentation](https://docs.open
 
 #### Open WebUI: Server Connection Error
 
-If you're experiencing connection issues, it’s often due to the WebUI docker container not being able to reach the Ollama server at 127.0.0.1:11434 (host.docker.internal:11434) inside the container . Use the `--network=host` flag in your docker command to resolve this. Note that the port changes from 3000 to 8080, resulting in the link: `http://localhost:8080`.
+If you're experiencing connection issues, it's often due to the WebUI docker container not being able to reach the Ollama server at 127.0.0.1:11434 (host.docker.internal:11434) inside the container. Use the `--network=host` flag in your docker command to resolve this. Note that the port changes from 3000 to 8080, resulting in the link: `http://localhost:8080`.
 
 **Example Docker Command**:
 
@@ -226,3 +226,182 @@ If you have any questions, suggestions, or need assistance, please open an issue
 ---
 
 Created by [Timothy Jaeryang Baek](https://github.com/tjbck) - Let's make Open WebUI even more amazing together! 💪
+
+# Notion Integration for Open WebUI
+
+This integration allows users to connect their Notion accounts to Open WebUI, enabling AI assistants to access and manipulate Notion databases and pages.
+
+## Features
+
+- OAuth-based authentication with Notion
+- List and query Notion databases
+- Create and update pages in Notion
+- Seamless integration with LLM function calling
+
+## Setup
+
+### 1. Create a Notion Integration
+
+1. Go to [https://www.notion.so/my-integrations](https://www.notion.so/my-integrations)
+2. Click "New integration"
+3. Name your integration (e.g., "Open WebUI")
+4. Select the workspace where you want to use the integration
+5. Set the following capabilities:
+   - Read content
+   - Update content
+   - Insert content
+6. Set the following OAuth capabilities:
+   - Read user information including email addresses
+7. Add a redirect URI: `https://your-open-webui-domain.com/api/v1/integrations/notion/callback`
+8. Save the integration
+
+### 2. Configure Open WebUI
+
+Set the following environment variables in your Open WebUI installation:
+
+```
+NOTION_CLIENT_ID=your_notion_client_id
+NOTION_CLIENT_SECRET=your_notion_client_secret
+NOTION_REDIRECT_URI=https://your-open-webui-domain.com/api/v1/integrations/notion/callback
+ENABLE_INTEGRATIONS=true
+```
+
+### 3. Connect Your Notion Account
+
+1. Navigate to the Integrations page in Open WebUI
+2. Click "Connect" on the Notion integration card
+3. Follow the OAuth flow to authorize Open WebUI to access your Notion workspace
+4. Once connected, you'll see your Notion databases listed
+
+## Usage
+
+Once connected, the AI can:
+
+1. Search your Notion workspace
+2. List and query your databases
+3. Create new pages in databases
+4. Update existing pages
+
+Example prompts:
+
+- "Show me a list of my Notion databases"
+- "Find information about project X in my Notion workspace"
+- "Create a new task in my Tasks database with title 'Review documentation'"
+- "Update the status of my 'Website redesign' task to 'In Progress'"
+
+## Security
+
+- All authentication is handled via OAuth
+- Access tokens are stored securely in the database
+- Users can disconnect their Notion integration at any time
+- Permissions are limited to what was granted during the OAuth flow
+
+## Troubleshooting
+
+If you encounter issues:
+
+1. Ensure your Notion integration is properly configured
+2. Check that the redirect URI matches exactly
+3. Verify that the user has granted appropriate permissions to the databases
+4. Check the server logs for detailed error messages
+
+## Development
+
+To extend this integration:
+
+1. The backend code is in `backend/open_webui/routers/integrations.py`
+2. The frontend components are in `frontend/src/components/Integrations/NotionIntegration.jsx`
+3. The LLM function definitions are in `backend/open_webui/utils/integrations/notion.py`
+
+# Using Notion Integration with OpenAI in Open WebUI
+
+## Overview
+
+This guide explains how to properly configure and use the Notion integration with AI assistants in Open WebUI.
+
+## Configuration Steps
+
+### 1. Ensure the Integration is Connected
+
+First, make sure your Notion integration is properly connected:
+
+1. Go to the Integrations page in Open WebUI
+2. Click "Connect" on the Notion integration
+3. Complete the OAuth flow to connect your Notion workspace
+
+### 2. Configure Your AI Assistant to Use Notion Tools
+
+When configuring your chat settings, ensure your model has access to function calling and tools:
+
+```javascript
+// In your chat configuration
+{
+  "tools": [
+    {
+      "type": "function",
+      "function": {
+        "name": "list_notion_databases",
+        "description": "List all Notion databases the user has access to",
+        "parameters": {
+          "type": "object",
+          "properties": {},
+          "required": []
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "search_notion",
+        "description": "Search Notion for pages, databases, and other content",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "query": {
+              "type": "string",
+              "description": "The search query string"
+            }
+          },
+          "required": ["query"]
+        }
+      }
+    },
+    {
+      "type": "function",
+      "function": {
+        "name": "query_notion_database",
+        "description": "Query a specific Notion database",
+        "parameters": {
+          "type": "object",
+          "properties": {
+            "database_id": {
+              "type": "string",
+              "description": "The ID of the database to query"
+            }
+          },
+          "required": ["database_id"]
+        }
+      }
+    }
+  ]
+}
+```
+
+### 3. How the AI Should Use the Tools
+
+The AI should call these functions when asked about Notion. For example:
+
+- When asked "What Notion databases do I have?", it should call `list_notion_databases`
+- When asked "Search my Notion for X", it should call `search_notion` with the query
+- When asked about specific database entries, it should call `query_notion_database`
+
+## Troubleshooting
+
+If the AI isn't correctly using the Notion tools:
+
+1. Make sure you're using a model that supports function calling (like GPT-4 or Claude 3)
+2. Check that your Notion integration is active in the Integrations page
+3. Verify that tools are correctly configured in your chat settings
+4. If using a custom AI configuration, ensure `tool_choice` is set to "auto"
+
+When properly configured, the AI will automatically use the Notion tools when relevant to answer user queries about their Notion content.

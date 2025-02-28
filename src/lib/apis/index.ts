@@ -940,12 +940,22 @@ export const updatePipelineValves = async (
 export const getBackendConfig = async () => {
 	let error = null;
 
+	// Get the authentication token from localStorage
+	const token = localStorage.getItem('token');
+
+	const headers = {
+		'Content-Type': 'application/json'
+	};
+
+	// Add the token to the headers if it exists
+	if (token) {
+		headers['Authorization'] = `Bearer ${token}`;
+	}
+
 	const res = await fetch(`${WEBUI_BASE_URL}/api/config`, {
 		method: 'GET',
 		credentials: 'include',
-		headers: {
-			'Content-Type': 'application/json'
-		}
+		headers: headers
 	})
 		.then(async (res) => {
 			if (!res.ok) throw await res.json();

@@ -8,6 +8,7 @@ from typing import Literal, Optional, overload
 import aiohttp
 from aiocache import cached
 import requests
+import httpx
 
 
 from fastapi import Depends, FastAPI, HTTPException, Request, APIRouter
@@ -19,28 +20,42 @@ from starlette.background import BackgroundTask
 from open_webui.models.models import Models
 from open_webui.config import (
     CACHE_DIR,
+    OLLAMA_API_BASE_URL,
+    ENABLE_OPENAI_API,
+    OPENAI_API_BASE_URLS,
+    OPENAI_API_KEYS,
+    OPENAI_API_CONFIGS,
+    ENABLE_INTEGRATIONS,
+    AVAILABLE_INTEGRATIONS
 )
 from open_webui.env import (
+    SRC_LOG_LEVELS,
+    BYPASS_MODEL_ACCESS_CONTROL,
     AIOHTTP_CLIENT_TIMEOUT,
     AIOHTTP_CLIENT_TIMEOUT_OPENAI_MODEL_LIST,
-    ENABLE_FORWARD_USER_INFO_HEADERS,
-    BYPASS_MODEL_ACCESS_CONTROL,
+    ENABLE_FORWARD_USER_INFO_HEADERS
 )
+from open_webui.utils.auth import get_admin_user, get_verified_user
+from open_webui.utils.access_control import has_access
 from open_webui.models.users import UserModel
-
+from open_webui.models.integrations import Integrations
 from open_webui.constants import ERROR_MESSAGES
-from open_webui.env import ENV, SRC_LOG_LEVELS
-
-
 from open_webui.utils.payload import (
     apply_model_params_to_body_openai,
     apply_model_system_prompt_to_body,
 )
 
-from open_webui.utils.auth import get_admin_user, get_verified_user
-from open_webui.utils.access_control import has_access
+# Import Notion integration utilities
+from open_webui.utils.integrations.notion import (
+    get_notion_function_tools,
+    handle_notion_function_execution,
+    format_notion_api_result_for_llm,
+)
 
+# Import Notion tools
+from open_webui.utils.openai_tools import NotionTools, execute_notion_tool
 
+router = APIRouter(prefix="/openai", tags=["openai"])
 log = logging.getLogger(__name__)
 log.setLevel(SRC_LOG_LEVELS["OPENAI"])
 
@@ -116,8 +131,6 @@ def openai_o1_o3_handler(payload):
 # API routes
 #
 ##########################################
-
-router = APIRouter()
 
 
 @router.get("/config")
@@ -573,6 +586,12 @@ async def verify_connection(
             raise HTTPException(status_code=500, detail=error_detail)
 
 
+@cached(ttl=600)
+async def process_tools(tool_choice, tools):
+    config = {"tool_choice": tool_choice, "tools": tools}
+    return config
+
+
 @router.post("/chat/completions")
 async def generate_chat_completion(
     request: Request,
@@ -667,6 +686,56 @@ async def generate_chat_completion(
     if "max_tokens" in payload and "max_completion_tokens" in payload:
         del payload["max_tokens"]
 
+    # Add integration-specific tools
+    try:
+        # Check for active Notion integration
+        notion_integration = Integrations.get_user_active_integration(
+            user.id, "notion"
+        )
+        
+        if notion_integration and notion_integration.active:
+            logging.info("User has active Notion integration, adding tools")
+            # Add Notion tools to payload
+            if "tools" not in payload:
+                payload["tools"] = []
+            
+            notion_tools = get_notion_function_tools()
+            payload["tools"].extend(notion_tools)
+            
+            # Add tool_choice to force using the Notion tools when specifically requested
+            message = payload.get("messages", [{}])[-1].get("content", "").lower()
+            
+            # More specific detection for listing databases
+            if any(phrase in message for phrase in [
+                "what notion databases", "list notion database", "show notion database", 
+                "my notion database", "notion databases do i have", "notion databases i have", 
+                "access to notion database", "what databases do i have in notion"
+            ]):
+                # Force using list_notion_databases function
+                logging.info("Detected Notion database listing query, forcing list_notion_databases tool")
+                payload["tool_choice"] = {
+                    "type": "function",
+                    "function": {"name": "list_notion_databases"}
+                }
+            # Detection for Notion search
+            elif any(phrase in message for phrase in [
+                "search notion", "find in notion", "look for in notion", 
+                "search my notion for", "find notion pages about"
+            ]):
+                # Let the model decide which search parameters to use
+                logging.info("Detected Notion search query, preferring search_notion tool")
+                payload["tool_choice"] = "auto"
+            # General Notion detection
+            elif any(phrase in message for phrase in [
+                "list notion", "show notion", "notion database", "notion databases", 
+                "my notion", "in notion", "from notion", "notion workspace"
+            ]):
+                # Set tool_choice to auto but ensure Notion tools are preferred
+                logging.info("Detected general Notion query, setting tool_choice to auto")
+                payload["tool_choice"] = "auto"
+    except Exception as e:
+        logging.error(f"Error adding Notion integration tools: {str(e)}")
+
     # Convert the modified body back to JSON
     payload = json.dumps(payload)
 
@@ -711,8 +780,91 @@ async def generate_chat_completion(
         # Check if response is SSE
         if "text/event-stream" in r.headers.get("Content-Type", ""):
             streaming = True
+            
+            # Process function calls in the response
+            async def process_response_function_calls(response_line):
+                try:
+                    if '"function_call":' in response_line:
+                        response_json = json.loads(response_line)
+                        
+                        # Check for Notion function calls
+                        if ENABLE_INTEGRATIONS.value and "choices" in response_json:
+                            for choice in response_json.get("choices", []):
+                                message = choice.get("message", {})
+                                function_call = message.get("function_call")
+                                
+                                if function_call:
+                                    function_name = function_call.get("name")
+                                    if function_name and function_name.startswith("notion_") or function_name in [
+                                        "search_notion", 
+                                        "list_notion_databases", 
+                                        "query_notion_database",
+                                        "create_notion_page",
+                                        "update_notion_page"
+                                    ]:
+                                        # Log the incoming function call for debugging
+                                        logging.info(f"Processing Notion function call: {function_name}")
+                                        logging.info(f"Raw arguments: {function_call.get('arguments')}")
+                                        
+                                        # Get the raw arguments
+                                        raw_arguments = function_call.get("arguments", "{}")
+                                        
+                                        # Pass the raw arguments string directly to handle_notion_function_execution
+                                        # It will handle parsing internally to avoid issues with empty or malformed JSON
+                                        action_data = handle_notion_function_execution(
+                                            function_name=function_name,
+                                            arguments=raw_arguments
+                                        )
+                                        
+                                        logging.info(f"Mapped to action data: {action_data}")
+                                        
+                                        # Execute the action using our execute_notion_tool function
+                                        result = await execute_notion_tool(
+                                            action_data=action_data,
+                                            access_token=notion_integration.access_token,
+                                            base_url=str(request.base_url)
+                                        )
+                                        
+                                        # Format the result for the LLM
+                                        formatted_result = format_notion_api_result_for_llm(result, function_name)
+                                        logging.info(f"Formatted result for {function_name}: {json.dumps(formatted_result)[:200]}...")
+                                        
+                                        # Add to function responses
+                                        function_responses.append({
+                                            "tool_call_id": tool_call.get("id"),
+                                            "role": "tool",
+                                            "name": function_name,
+                                            "content": json.dumps(formatted_result)
+                                        })
+                                        
+                                        logging.info(f"Successfully executed Notion function: {function_name}")
+                                    else:
+                                        logging.warning(f"Notion integration not active for user {user.id} but function was called")
+                                        function_responses.append({
+                                            "tool_call_id": tool_call.get("id"),
+                                            "role": "tool",
+                                            "name": function_name,
+                                            "content": json.dumps({"error": "Notion integration not connected. Please connect Notion in the Integrations page."})
+                                        })
+                    return response_line
+                except Exception as e:
+                    log.error(f"Error processing function call: {str(e)}")
+                    return response_line
+
+            async def iterate_chunks():
+                async for chunk in r.content:
+                    if chunk:
+                        try:
+                            text_chunk = chunk.decode("utf-8")
+                            # Process function calls
+                            if 'function_call' in text_chunk:
+                                text_chunk = await process_response_function_calls(text_chunk)
+                            yield text_chunk
+                        except:
+                            yield chunk.decode("utf-8")
+
             return StreamingResponse(
-                r.content,
+                iterate_chunks(),
                 status_code=r.status,
                 headers=dict(r.headers),
                 background=BackgroundTask(
@@ -727,7 +879,152 @@ async def generate_chat_completion(
                 response = await r.text()
 
             r.raise_for_status()
-            return response
+
+            # Process the response from OpenAI
+            try:
+                response_data = await r.json()
+                
+                # Handle tool calls if present
+                if "choices" in response_data and len(response_data["choices"]) > 0:
+                    choice = response_data["choices"][0]
+                    if "message" in choice and "tool_calls" in choice["message"]:
+                        tool_calls = choice["message"]["tool_calls"]
+                        function_responses = []
+                        
+                        for tool_call in tool_calls:
+                            if tool_call.get("type") == "function":
+                                function_call = tool_call.get("function", {})
+                                function_name = function_call.get("name", "")
+                                
+                                # Check if this is a Notion function call
+                                if (function_name == "list_notion_databases" or 
+                                    function_name == "search_notion" or 
+                                    function_name == "query_notion_database" or
+                                    function_name == "create_notion_page" or
+                                    function_name == "update_notion_page"):
+                                    try:
+                                        # Get the user's Notion integration
+                                        notion_integration = Integrations.get_user_active_integration(
+                                            user.id, "notion"
+                                        )
+                                        
+                                        if notion_integration and notion_integration.active:
+                                            # Log the incoming function call for debugging
+                                            logging.info(f"Processing Notion function call: {function_name}")
+                                            logging.info(f"Raw arguments: {function_call.get('arguments')}")
+                                            
+                                            # Get the raw arguments
+                                            raw_arguments = function_call.get("arguments", "{}")
+                                            
+                                            # Pass the raw arguments string directly to handle_notion_function_execution
+                                            # It will handle parsing internally to avoid issues with empty or malformed JSON
+                                            action_data = handle_notion_function_execution(
+                                                function_name=function_name,
+                                                arguments=raw_arguments
+                                            )
+                                            
+                                            logging.info(f"Mapped to action data: {action_data}")
+                                            
+                                            # Execute the action using our execute_notion_tool function
+                                            result = await execute_notion_tool(
+                                                action_data=action_data,
+                                                access_token=notion_integration.access_token,
+                                                base_url=str(request.base_url)
+                                            )
+                                            
+                                            # Format the result for the LLM
+                                            formatted_result = format_notion_api_result_for_llm(result, function_name)
+                                            logging.info(f"Formatted result for {function_name}: {json.dumps(formatted_result)[:200]}...")
+                                            
+                                            # Add to function responses
+                                            function_responses.append({
+                                                "tool_call_id": tool_call.get("id"),
+                                                "role": "tool",
+                                                "name": function_name,
+                                                "content": json.dumps(formatted_result)
+                                            })
+                                            
+                                            logging.info(f"Successfully executed Notion function: {function_name}")
+                                        else:
+                                            logging.warning(f"Notion integration not active for user {user.id} but function was called")
+                                            function_responses.append({
+                                                "tool_call_id": tool_call.get("id"),
+                                                "role": "tool",
+                                                "name": function_name,
+                                                "content": json.dumps({"error": "Notion integration not connected. Please connect Notion in the Integrations page."})
+                                            })
+                                    except Exception as e:
+                                        logging.error(f"Error executing Notion function {function_name}: {str(e)}")
+                                        import traceback
+                                        logging.error(f"Traceback: {traceback.format_exc()}")
+                                        # Add error response
+                                        function_responses.append({
+                                            "tool_call_id": tool_call.get("id"),
+                                            "role": "tool",
+                                            "name": function_name,
+                                            "content": json.dumps({"error": f"Failed to execute Notion function: {str(e)}"})
+                                        })
+                        
+                        # If we have function responses, send them back to the model for a final response
+                        if function_responses:
+                            # Create a new messages array including the original conversation and function results
+                            new_messages = payload.get("messages", [])
+                            new_messages.append(choice["message"])  # Add the assistant's response with tool calls
+                            
+                            # Add the function responses
+                            for func_response in function_responses:
+                                new_messages.append({
+                                    "role": "tool",
+                                    "tool_call_id": func_response.get("tool_call_id"),
+                                    "name": func_response.get("name"),
+                                    "content": func_response.get("content")
+                                })
+                            
+                            # Create a new request to continue the conversation with function results
+                            function_response_payload = {
+                                "model": payload.get("model"),
+                                "messages": new_messages,
+                                "stream": payload.get("stream", False)
+                            }
+                            
+                            # Copy other parameters
+                            for key, value in payload.items():
+                                if key not in ["model", "messages", "stream"]:
+                                    function_response_payload[key] = value
+                            
+                            # Define headers for the second request
+                            headers = {
+                                "Authorization": f"Bearer {key}",
+                                "Content-Type": "application/json",
+                                **(
+                                    {
+                                        "HTTP-Referer": "https://openwebui.com/",
+                                        "X-Title": "Open WebUI",
+                                    }
+                                    if "openrouter.ai" in url
+                                    else {}
+                                ),
+                                **(
+                                    {
+                                        "X-OpenWebUI-User-Name": user.name,
+                                        "X-OpenWebUI-User-Id": user.id,
+                                        "X-OpenWebUI-User-Email": user.email,
+                                        "X-OpenWebUI-User-Role": user.role,
+                                    }
+                                    if ENABLE_FORWARD_USER_INFO_HEADERS
+                                    else {}
+                                ),
+                            }
+                            
+                            # Make the second request to get the final response
+                            async with session.post(url, json=function_response_payload, headers=headers) as second_response:
+                                second_response.raise_for_status()
+                                return await second_response.json()
+                
+                return response_data
+            except Exception as e:
+                logging.error(f"Error processing OpenAI response: {str(e)}")
+                return await r.json()  # Return the original response if there's an error
     except Exception as e:
         log.exception(e)
 

@@ -77,6 +77,10 @@ from open_webui.routers import (
     users,
     utils,
 )
+# Import the router from integrations.py for the main integrations endpoints
+from open_webui.routers.integrations import router as integrations_router
+# Import router from the integrations package for properly structured sub-routes
+from open_webui.routers.integrations import router as integrations_package_router
 
 from open_webui.routers.retrieval import (
     get_embedding_function,
@@ -305,6 +309,12 @@ from open_webui.config import (
     AUTOCOMPLETE_GENERATION_INPUT_MAX_LENGTH,
     AppConfig,
     reset_config,
+    # Integrations
+    ENABLE_INTEGRATIONS,
+    AVAILABLE_INTEGRATIONS,
+    NOTION_CLIENT_ID,
+    NOTION_CLIENT_SECRET,
+    NOTION_REDIRECT_URI,
 )
 from open_webui.env import (
     AUDIT_EXCLUDED_PATHS,
@@ -351,6 +361,9 @@ from open_webui.utils.oauth import OAuthManager
 from open_webui.utils.security_headers import SecurityHeadersMiddleware
 
 from open_webui.tasks import stop_task, list_tasks  # Import from tasks.py
+from open_webui.utils.openai_tools import register_notion_tools
+
+from open_webui.routers.integrations import notion
 
 
 if SAFE_MODE:
@@ -408,9 +421,12 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    docs_url="/docs" if ENV == "dev" else None,
-    openapi_url="/openapi.json" if ENV == "dev" else None,
-    redoc_url=None,
+    title="Open WebUI API",
+    description="API for Open WebUI",
+    version=VERSION,
+    docs_url="/api/docs",
+    redoc_url="/api/redoc",
+    openapi_url="/api/openapi.json",
     lifespan=lifespan,
 )
 
@@ -524,6 +540,18 @@ app.state.AUTH_TRUSTED_NAME_HEADER = WEBUI_AUTH_TRUSTED_NAME_HEADER
 app.state.USER_COUNT = None
 app.state.TOOLS = {}
 app.state.FUNCTIONS = {}
+
+########################################
+#
+# INTEGRATIONS
+#
+########################################
+
+app.state.config.ENABLE_INTEGRATIONS = ENABLE_INTEGRATIONS
+app.state.AVAILABLE_INTEGRATIONS = AVAILABLE_INTEGRATIONS
+app.state.NOTION_CLIENT_ID = NOTION_CLIENT_ID.value
+app.state.NOTION_CLIENT_SECRET = NOTION_CLIENT_SECRET.value
+app.state.NOTION_REDIRECT_URI = NOTION_REDIRECT_URI.value
 
 ########################################
 #
@@ -886,6 +914,8 @@ app.include_router(models.router, prefix="/api/v1/models", tags=["models"])
 app.include_router(knowledge.router, prefix="/api/v1/knowledge", tags=["knowledge"])
 app.include_router(prompts.router, prefix="/api/v1/prompts", tags=["prompts"])
 app.include_router(tools.router, prefix="/api/v1/tools", tags=["tools"])
+app.include_router(integrations_router, prefix="/api/v1/integrations", tags=["integrations"])
+app.include_router(integrations_package_router, prefix="/api/v1/integrations-pkg", tags=["integrations-pkg"])
 
 app.include_router(memories.router, prefix="/api/v1/memories", tags=["memories"])
 app.include_router(folders.router, prefix="/api/v1/folders", tags=["folders"])
@@ -1179,6 +1209,7 @@ async def get_app_config(request: Request):
                     "enable_admin_chat_access": ENABLE_ADMIN_CHAT_ACCESS,
                     "enable_google_drive_integration": app.state.config.ENABLE_GOOGLE_DRIVE_INTEGRATION,
                     "enable_onedrive_integration": app.state.config.ENABLE_ONEDRIVE_INTEGRATION,
+                    "enable_integrations": app.state.config.ENABLE_INTEGRATIONS,
                 }
                 if user is not None
                 else {}
@@ -1211,6 +1242,9 @@ async def get_app_config(request: Request):
                     "api_key": GOOGLE_DRIVE_API_KEY.value,
                 },
                 "onedrive": {"client_id": ONEDRIVE_CLIENT_ID.value},
+                "integrations": {
+                    "available": app.state.AVAILABLE_INTEGRATIONS,
+                },
             }
             if user is not None
             else {}
@@ -1382,3 +1416,6 @@ else:
     log.warning(
         f"Frontend build directory not found at '{FRONTEND_BUILD_DIR}'. Serving API only."
     )
+
+# Register Notion tools
+register_notion_tools(app)

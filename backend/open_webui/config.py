@@ -1076,6 +1076,7 @@ def validate_cors_origin(origin):
 # in your .env file depending on your frontend port, 5173 in this case.
 CORS_ALLOW_ORIGIN = os.environ.get("CORS_ALLOW_ORIGIN", "*").split(";")
 
+log.info(f"CORS_ALLOW_ORIGIN: {CORS_ALLOW_ORIGIN}")
 if "*" in CORS_ALLOW_ORIGIN:
     log.warning(
         "\n\nWARNING: CORS_ALLOW_ORIGIN IS SET TO '*' - NOT RECOMMENDED FOR PRODUCTION DEPLOYMENTS.\n"
@@ -2434,3 +2435,48 @@ LDAP_CA_CERT_FILE = PersistentConfig(
 LDAP_CIPHERS = PersistentConfig(
     "LDAP_CIPHERS", "ldap.server.ciphers", os.environ.get("LDAP_CIPHERS", "ALL")
 )
+
+####################################
+# External Integrations
+####################################
+
+# Notion Integration
+NOTION_CLIENT_ID = PersistentConfig(
+    "NOTION_CLIENT_ID",
+    "integrations.notion.client_id",
+    os.environ.get("NOTION_CLIENT_ID", ""),
+)
+
+NOTION_CLIENT_SECRET = PersistentConfig(
+    "NOTION_CLIENT_SECRET",
+    "integrations.notion.client_secret",
+    os.environ.get("NOTION_CLIENT_SECRET", ""),
+)
+
+NOTION_REDIRECT_URI = PersistentConfig(
+    "NOTION_REDIRECT_URI",
+    "integrations.notion.redirect_uri",
+    os.environ.get("NOTION_REDIRECT_URI", ""),
+)
+
+# Add more external integrations here
+
+####################################
+# Integrations Settings
+####################################
+
+ENABLE_INTEGRATIONS = PersistentConfig(
+    "ENABLE_INTEGRATIONS",
+    "integrations.enable",
+    os.environ.get("ENABLE_INTEGRATIONS", "True").lower() == "true",
+)
+
+# Define map of available integrations
+AVAILABLE_INTEGRATIONS = {
+    "notion": {
+        "name": "Notion",
+        "description": "Connect to Notion to access your databases and pages",
+        "icon": "/static/integrations/notion.png",
+        "enabled": NOTION_CLIENT_ID.value != "" and NOTION_CLIENT_SECRET.value != "",
+    }
+}
