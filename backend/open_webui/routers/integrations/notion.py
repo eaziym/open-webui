@@ -10,6 +10,7 @@ import string
 from sqlalchemy.orm import Session
 from fastapi.responses import RedirectResponse
 import base64
+import os
 
 from open_webui.models.users import UserModel as User
 from open_webui.models.integrations import IntegrationModel as IntegrationConnection
@@ -219,20 +220,28 @@ async def execute_notion_action(
     try:
         logger.info(f"Executing Notion action: {request.action} with params: {request.params}")
         
-        # Use the get_db context manager properly
-        with get_db() as db:
-            # Find user's active Notion integration
-            integration = db.query(IntegrationConnection).filter(
-                IntegrationConnection.user_id == user.id,
-                IntegrationConnection.integration_type == "notion",
-                IntegrationConnection.active == True
-            ).first()
-            
-            if not integration:
-                raise HTTPException(status_code=400, detail="No active Notion integration found")
-            
-            # Get the access token
-            access_token = integration.access_token
+        # Check for environment variable first
+        env_token = os.environ.get("NOTION_ACCESS_TOKEN")
+        
+        if env_token:
+            logger.info("Using NOTION_ACCESS_TOKEN from environment variable")
+            access_token = env_token
+        else:
+            logger.warning("NOTION_ACCESS_TOKEN environment variable not found, falling back to database token")
+            # Use the get_db context manager properly
+            with get_db() as db:
+                # Find user's active Notion integration
+                integration = db.query(IntegrationConnection).filter(
+                    IntegrationConnection.user_id == user.id,
+                    IntegrationConnection.integration_type == "notion",
+                    IntegrationConnection.active == True
+                ).first()
+                
+                if not integration:
+                    raise HTTPException(status_code=400, detail="No active Notion integration found")
+                
+                # Get the access token
+                access_token = integration.access_token
         
         # Call the API using the access token
         headers = {

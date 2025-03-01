@@ -405,3 +405,72 @@ If the AI isn't correctly using the Notion tools:
 4. If using a custom AI configuration, ensure `tool_choice` is set to "auto"
 
 When properly configured, the AI will automatically use the Notion tools when relevant to answer user queries about their Notion content.
+
+# Notion Integration Fix for OpenWebUI
+
+## The Issue
+
+While working with Notion integration in OpenWebUI, we discovered a disconnect between how the exported Notion tool and OpenWebUI's internal Notion integration handle authentication:
+
+1. The **Notion Tool** we created uses the `NOTION_ACCESS_TOKEN` environment variable to authenticate with the Notion API directly.
+
+2. **OpenWebUI's Internal Integration** uses a database-stored OAuth token, which seems to be invalid or improperly configured, resulting in `401 Unauthorized` errors.
+
+## The Solution
+
+We've created a "monkey patch" that overrides the internal Notion API calls to use the environment variable instead of the database token. This approach allows us to:
+
+1. Keep our existing Notion tool working
+2. Fix the integration without modifying OpenWebUI's core code
+3. Use a simpler, direct authentication approach that's working in the environment
+
+## Files Included
+
+1. `fix_notion_integration.py` - The core patch that overrides the authentication mechanism
+2. `install_notion_fix.sh` - A shell script to automate the installation
+3. `NOTION_INTEGRATION_FIX.md` - Detailed manual installation instructions
+
+## Installation
+
+### Automatic Installation (Recommended)
+
+1. Place the `install_notion_fix.sh` script in your OpenWebUI root directory
+2. Make it executable: `chmod +x install_notion_fix.sh`
+3. Run it: `./install_notion_fix.sh`
+4. Restart your OpenWebUI server
+
+### Manual Installation
+
+See the detailed instructions in `NOTION_INTEGRATION_FIX.md`.
+
+## How It Works
+
+The patch works by:
+
+1. Importing the existing `execute_notion_tool` function from OpenWebUI
+2. Creating a patched version that ignores the access token from the database
+3. Using the environment variable token for all API calls
+4. Monkey-patching the original function at runtime
+
+## Verification
+
+When properly installed, your logs should show:
+
+```
+Patching Notion integration to use environment variable token...
+Successfully patched Notion integration!
+```
+
+And when using a Notion tool:
+
+```
+Using patched Notion integration with environment variable token
+```
+
+## Reverting Changes
+
+To revert the changes:
+
+1. `mv backend/open_webui/main.py.bak backend/open_webui/main.py`
+2. `rm fix_notion_integration.py`
+3. Restart your server

@@ -9,6 +9,7 @@ import aiohttp
 from aiocache import cached
 import requests
 import httpx
+import time
 
 
 from fastapi import Depends, FastAPI, HTTPException, Request, APIRouter
@@ -457,7 +458,7 @@ async def get_models(
         models = await get_all_models(request, user=user)
     else:
         url = request.app.state.config.OPENAI_API_BASE_URLS[url_idx]
-        key = request.app.state.config.OPENAI_API_KEYS[url_idx]
+        openai_api_key = request.app.state.config.OPENAI_API_KEYS[url_idx]
 
         r = None
         async with aiohttp.ClientSession(
@@ -469,7 +470,7 @@ async def get_models(
                 async with session.get(
                     f"{url}/models",
                     headers={
-                        "Authorization": f"Bearer {key}",
+                        "Authorization": f"Bearer {openai_api_key}",
                         "Content-Type": "application/json",
                         **(
                             {
@@ -671,7 +672,7 @@ async def generate_chat_completion(
         }
 
     url = request.app.state.config.OPENAI_API_BASE_URLS[idx]
-    key = request.app.state.config.OPENAI_API_KEYS[idx]
+    openai_api_key = request.app.state.config.OPENAI_API_KEYS[idx]
 
     # Fix: o1,o3 does not support the "max_tokens" parameter, Modify "max_tokens" to "max_completion_tokens"
     is_o1_o3 = payload["model"].lower().startswith(("o1", "o3-"))
@@ -736,6 +737,9 @@ async def generate_chat_completion(
     except Exception as e:
         logging.error(f"Error adding Notion integration tools: {str(e)}")
 
+    # Store the original payload as a Python dictionary before JSON conversion
+    payload_dict = payload.copy()
+    
     # Convert the modified body back to JSON
     payload = json.dumps(payload)
 
@@ -754,7 +758,7 @@ async def generate_chat_completion(
             url=f"{url}/chat/completions",
             data=payload,
             headers={
-                "Authorization": f"Bearer {key}",
+                "Authorization": f"Bearer {openai_api_key}",
                 "Content-Type": "application/json",
                 **(
                     {
@@ -780,6 +784,9 @@ async def generate_chat_completion(
         # Check if response is SSE
         if "text/event-stream" in r.headers.get("Content-Type", ""):
             streaming = True
+            
+            # Store function responses
+            function_responses = []
             
             # Process function calls in the response
             async def process_response_function_calls(response_line):
@@ -825,23 +832,66 @@ async def generate_chat_completion(
                                             base_url=str(request.base_url)
                                         )
                                         
-                                        # Format the result for the LLM
-                                        formatted_result = format_notion_api_result_for_llm(result, function_name)
-                                        logging.info(f"Formatted result for {function_name}: {json.dumps(formatted_result)[:200]}...")
+                                        # Process the result based on data type
+                                        formatted_result = result
+                                        logging.info(f"Using pre-formatted result for {function_name}: {str(formatted_result)[:200]}...")
+                                        
+                                        # Extract a tool call ID - use function index if available, or generate one
+                                        tool_call_id = None
+                                        # Try to extract a tool call ID from choice message
+                                        if 'message' in choice and 'function_call' in message:
+                                            function_name = function_call.get("name")
+                                            # Look for a matching tool_call in the response
+                                            if 'tool_calls' in message:
+                                                for tool_call in message.get('tool_calls', []):
+                                                    if (tool_call.get('type') == 'function' and
+                                                        tool_call.get('function', {}).get('name') == function_name):
+                                                        tool_call_id = tool_call.get('id')
+                                                        break
+                                        
+                                        # If no ID was found, generate one
+                                        if not tool_call_id:
+                                            idx = choice.get("index", "0")
+                                            response_id = None
+                                            try:
+                                                if isinstance(response_line, str):
+                                                    data = json.loads(response_line)
+                                                    if "id" in data:
+                                                        response_id = data["id"]
+                                            except:
+                                                pass
+                                                
+                                            if response_id:
+                                                tool_call_id = f"{response_id}-{idx}"
+                                            else:
+                                                tool_call_id = f"ftc_{int(time.time())}-{idx}"
+                                        
+                                        # Format the content correctly
+                                        content = formatted_result
+                                        if not isinstance(content, str):
+                                            content = json.dumps(content)
                                         
                                         # Add to function responses
                                         function_responses.append({
-                                            "tool_call_id": tool_call.get("id"),
+                                            "tool_call_id": tool_call_id,
                                             "role": "tool",
                                             "name": function_name,
-                                            "content": json.dumps(formatted_result)
+                                            "content": content
                                         })
                                         
                                         logging.info(f"Successfully executed Notion function: {function_name}")
                                     else:
                                         logging.warning(f"Notion integration not active for user {user.id} but function was called")
+                                        
+                                        # Extract tool_call_id from the tool_call dictionary
+                                        tool_call_id = choice.get("index", "0")
+                                        if "id" in response_json:
+                                            tool_call_id = f"{response_json['id']}-{tool_call_id}"
+                                        else:
+                                            tool_call_id = f"ftc_{int(time.time())}-{tool_call_id}"
+                                            
                                         function_responses.append({
-                                            "tool_call_id": tool_call.get("id"),
+                                            "tool_call_id": tool_call_id, 
                                             "role": "tool",
                                             "name": function_name,
                                             "content": json.dumps({"error": "Notion integration not connected. Please connect Notion in the Integrations page."})
@@ -862,6 +912,12 @@ async def generate_chat_completion(
                             yield text_chunk
                         except:
                             yield chunk.decode("utf-8")
+                
+                # After the stream finishes, send any function responses if there are any
+                if function_responses:
+                    logging.info(f"Stream finished, sending {len(function_responses)} function responses")
+                    # Send a data chunk containing the function responses
+                    yield f"data: {json.dumps({'function_responses': function_responses})}\n\n"
 
             return StreamingResponse(
                 iterate_chunks(),
@@ -932,69 +988,115 @@ async def generate_chat_completion(
                                                 base_url=str(request.base_url)
                                             )
                                             
-                                            # Format the result for the LLM
-                                            formatted_result = format_notion_api_result_for_llm(result, function_name)
-                                            logging.info(f"Formatted result for {function_name}: {json.dumps(formatted_result)[:200]}...")
+                                            # Process the result based on data type
+                                            formatted_result = result
+                                            logging.info(f"Using pre-formatted result for {function_name}: {str(formatted_result)[:200]}...")
+                                            
+                                            # Extract a tool call ID - use function index if available, or generate one
+                                            tool_call_id = None
+                                            # Try to extract a tool call ID from choice message
+                                            if 'message' in choice and 'function_call' in message:
+                                                function_name = function_call.get("name")
+                                                # Look for a matching tool_call in the response
+                                                if 'tool_calls' in message:
+                                                    for tool_call in message.get('tool_calls', []):
+                                                        if (tool_call.get('type') == 'function' and
+                                                            tool_call.get('function', {}).get('name') == function_name):
+                                                            tool_call_id = tool_call.get('id')
+                                                            break
+                                            
+                                            # If no ID was found, generate one
+                                            if not tool_call_id:
+                                                idx = choice.get("index", "0")
+                                                if "id" in response_data:
+                                                    tool_call_id = f"{response_data['id']}-{idx}"
+                                                else:
+                                                    tool_call_id = f"ftc_{int(time.time())}-{idx}"
+                                            
+                                            # Format the content correctly
+                                            content = formatted_result
+                                            if not isinstance(content, str):
+                                                content = json.dumps(content)
                                             
                                             # Add to function responses
                                             function_responses.append({
-                                                "tool_call_id": tool_call.get("id"),
+                                                "tool_call_id": tool_call_id,
                                                 "role": "tool",
                                                 "name": function_name,
-                                                "content": json.dumps(formatted_result)
+                                                "content": content
                                             })
                                             
                                             logging.info(f"Successfully executed Notion function: {function_name}")
                                         else:
                                             logging.warning(f"Notion integration not active for user {user.id} but function was called")
+                                            
+                                            # Extract tool_call_id from the tool_call dictionary
+                                            tool_call_id = tool_call.get("id", f"ftc_{int(time.time())}")
+                                            
                                             function_responses.append({
-                                                "tool_call_id": tool_call.get("id"),
+                                                "tool_call_id": tool_call_id,
                                                 "role": "tool",
                                                 "name": function_name,
                                                 "content": json.dumps({"error": "Notion integration not connected. Please connect Notion in the Integrations page."})
                                             })
                                     except Exception as e:
-                                        logging.error(f"Error executing Notion function {function_name}: {str(e)}")
-                                        import traceback
-                                        logging.error(f"Traceback: {traceback.format_exc()}")
-                                        # Add error response
+                                        logging.error(f"Error processing Notion tool call: {str(e)}")
+                                        
+                                        # Extract tool_call_id from the tool_call dictionary
+                                        tool_call_id = tool_call.get("id", f"ftc_{int(time.time())}")
+                                        
                                         function_responses.append({
-                                            "tool_call_id": tool_call.get("id"),
+                                            "tool_call_id": tool_call_id,
                                             "role": "tool",
                                             "name": function_name,
-                                            "content": json.dumps({"error": f"Failed to execute Notion function: {str(e)}"})
+                                            "content": json.dumps({"error": f"Error processing Notion tool: {str(e)}"})
                                         })
                         
                         # If we have function responses, send them back to the model for a final response
                         if function_responses:
+                            logging.info(f"Sending {len(function_responses)} function responses back to the model")
+                            logging.info(f"Function responses: {function_responses}")
+                            logging.info(f"Payload: {payload_dict}")
                             # Create a new messages array including the original conversation and function results
-                            new_messages = payload.get("messages", [])
+                            new_messages = payload_dict.get("messages", [])
                             new_messages.append(choice["message"])  # Add the assistant's response with tool calls
                             
                             # Add the function responses
                             for func_response in function_responses:
+                                # Find the matching tool call in the assistant's message
+                                tool_call_id = None
+                                if 'tool_calls' in choice.get('message', {}):
+                                    for tool_call in choice['message']['tool_calls']:
+                                        if tool_call.get('function', {}).get('name') == func_response.get('name'):
+                                            tool_call_id = tool_call.get('id')
+                                            break
+                                
+                                # If no matching tool call found, use a default ID
+                                if not tool_call_id:
+                                    tool_call_id = func_response.get("tool_call_id", f"ftc_{int(time.time())}")
+                                
                                 new_messages.append({
                                     "role": "tool",
-                                    "tool_call_id": func_response.get("tool_call_id"),
+                                    "tool_call_id": tool_call_id,
                                     "name": func_response.get("name"),
                                     "content": func_response.get("content")
                                 })
                             
                             # Create a new request to continue the conversation with function results
                             function_response_payload = {
-                                "model": payload.get("model"),
+                                "model": payload_dict.get("model"),
                                 "messages": new_messages,
-                                "stream": payload.get("stream", False)
+                                "stream": payload_dict.get("stream", False)
                             }
-                            
+                            logging.info(f"Function response payload: {function_response_payload}")
                             # Copy other parameters
-                            for key, value in payload.items():
-                                if key not in ["model", "messages", "stream"]:
+                            for key, value in payload_dict.items():
+                                if key not in ["model", "messages", "stream", "tools", "tool_choice"]:
                                     function_response_payload[key] = value
                             
                             # Define headers for the second request
                             headers = {
-                                "Authorization": f"Bearer {key}",
+                                "Authorization": f"Bearer {openai_api_key}",
                                 "Content-Type": "application/json",
                                 **(
                                     {
@@ -1016,12 +1118,87 @@ async def generate_chat_completion(
                                 ),
                             }
                             
+                            logging.info(f"openai api key: {openai_api_key}")
                             # Make the second request to get the final response
-                            async with session.post(url, json=function_response_payload, headers=headers) as second_response:
-                                second_response.raise_for_status()
-                                return await second_response.json()
-                
-                return response_data
+                            async with session.post(f"{url}/chat/completions", json=function_response_payload, headers=headers) as second_response:
+                                second_response_status = second_response.status
+                                logging.info(f"second response: {second_response}")
+                                try:
+                                    second_response.raise_for_status()
+                                    final_response = await second_response.json()
+                                    logging.info(f"final response: {final_response}")
+                                    # Properly handle the final response - check if it's a dictionary first
+                                    if isinstance(final_response, dict):
+                                        return final_response
+                                    elif isinstance(final_response, str):
+                                        try:
+                                            # If it's a string, try to parse it as JSON
+                                            parsed_response = json.loads(final_response)
+                                            return parsed_response
+                                        except json.JSONDecodeError:
+                                            # If parsing fails, just return the string as is
+                                            return {"choices": [{"message": {"content": final_response}}]}
+                                    # Fallback
+                                    return {"choices": [{"message": {"content": str(final_response)}}]}
+                                except Exception as e:
+                                    error_text = await second_response.text()
+                                    logging.error(f"Second request failed with status {second_response_status}: {error_text}")
+                                    
+                                    # If the second request fails, we'll try a simpler approach
+                                    # Create a clean messages array with only essential information
+                                    simple_messages = []
+                                    
+                                    # Add a simple system message
+                                    system_message = next((m for m in payload_dict.get("messages", []) if m.get("role") == "system"), None)
+                                    if system_message:
+                                        simple_messages.append({"role": "system", "content": "You are a helpful assistant. Review the Notion database information and respond to the user's query."})
+                                    
+                                    # Add the user's original query
+                                    user_message = next((m for m in payload_dict.get("messages", []) if m.get("role") == "user"), None)
+                                    if user_message:
+                                        simple_messages.append({"role": "user", "content": user_message.get("content", "")})
+                                    
+                                    # Extract the function result and add it as assistant+user interaction
+                                    function_result_content = None
+                                    for func_response in function_responses:
+                                        if func_response.get("name") == "list_notion_databases":
+                                            try:
+                                                result_json = json.loads(func_response.get("content", "{}"))
+                                                if "databases" in result_json:
+                                                    db_list = result_json.get("databases", [])
+                                                    db_text = "You have the following Notion database(s):\n"
+                                                    for db in db_list:
+                                                        db_text += f"- {db.get('title', 'Untitled')} (ID: {db.get('id', 'Unknown')})\n"
+                                                    function_result_content = db_text
+                                            except:
+                                                function_result_content = func_response.get("content", "No database information available.")
+                                    
+                                    if function_result_content:
+                                        simple_messages.append({"role": "assistant", "content": function_result_content})
+                                    
+                                    # Add a final user prompt
+                                    simple_messages.append({"role": "user", "content": "Please provide a friendly response about the database(s) I have access to in Notion."})
+                                    
+                                    # Create a simplified payload for the third attempt
+                                    simple_payload = {
+                                        "model": payload_dict.get("model"),
+                                        "messages": simple_messages,
+                                        "stream": payload_dict.get("stream", False)
+                                    }
+                                    
+                                    try:
+                                        async with session.post(f"{url}/chat/completions", json=simple_payload, headers=headers) as third_response:
+                                            third_response.raise_for_status()
+                                            third_response_data = await third_response.json()
+                                            return third_response_data
+                                    except Exception as third_error:
+                                        logging.error(f"Third request failed: {third_error}")
+                                        # If all else fails, return a helpful message with the database info
+                                        if function_result_content:
+                                            return {"choices": [{"message": {"content": f"I found your Notion database(s):\n\n{function_result_content}"}}]}
+                                        else:
+                                            # Return the original response as a fallback
+                                            return response_data
             except Exception as e:
                 logging.error(f"Error processing OpenAI response: {str(e)}")
                 return await r.json()  # Return the original response if there's an error
@@ -1056,7 +1233,7 @@ async def proxy(path: str, request: Request, user=Depends(get_verified_user)):
 
     idx = 0
     url = request.app.state.config.OPENAI_API_BASE_URLS[idx]
-    key = request.app.state.config.OPENAI_API_KEYS[idx]
+    openai_api_key = request.app.state.config.OPENAI_API_KEYS[idx]
 
     r = None
     session = None
@@ -1069,7 +1246,7 @@ async def proxy(path: str, request: Request, user=Depends(get_verified_user)):
             url=f"{url}/{path}",
             data=body,
             headers={
-                "Authorization": f"Bearer {key}",
+                "Authorization": f"Bearer {openai_api_key}",
                 "Content-Type": "application/json",
                 **(
                     {
