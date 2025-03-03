@@ -16,11 +16,6 @@ from open_webui.models.users import UserModel as User
 from open_webui.models.integrations import IntegrationModel as IntegrationConnection
 from open_webui.internal.db import get_db
 from open_webui.utils.auth import get_current_user
-from open_webui.utils.integrations.notion import (
-    get_notion_function_tools, 
-    handle_notion_function_execution, 
-    format_notion_api_result_for_llm
-)
 from open_webui.models.integrations import Integrations
 from open_webui.config import (
     AVAILABLE_INTEGRATIONS, 
@@ -215,151 +210,60 @@ async def execute_notion_action(
     user: User = Depends(get_current_user),
 ):
     """
-    Execute a Notion action with the given parameters
+    Return information about Notion API endpoints without executing actions.
     """
     try:
-        logger.info(f"Executing Notion action: {request.action} with params: {request.params}")
+        logger.info(f"Received Notion action request: {request.action} with params: {request.params}")
         
-        # Check for environment variable first
-        env_token = os.environ.get("NOTION_ACCESS_TOKEN")
-        
-        if env_token:
-            logger.info("Using NOTION_ACCESS_TOKEN from environment variable")
-            access_token = env_token
-        else:
-            logger.warning("NOTION_ACCESS_TOKEN environment variable not found, falling back to database token")
-            # Use the get_db context manager properly
-            with get_db() as db:
-                # Find user's active Notion integration
-                integration = db.query(IntegrationConnection).filter(
-                    IntegrationConnection.user_id == user.id,
-                    IntegrationConnection.integration_type == "notion",
-                    IntegrationConnection.active == True
-                ).first()
-                
-                if not integration:
-                    raise HTTPException(status_code=400, detail="No active Notion integration found")
-                
-                # Get the access token
-                access_token = integration.access_token
-        
-        # Call the API using the access token
-        headers = {
-            "Authorization": f"Bearer {access_token}",
-            "Notion-Version": "2022-06-28",
-            "Content-Type": "application/json"
+        # List of available Notion API endpoints integrated with Open WebUI
+        available_endpoints = {
+            "search": {
+                "description": "Search for Notion content",
+                "endpoint": "search",
+                "method": "POST",
+                "params": ["query", "filter", "sort"]
+            },
+            "list_databases": {
+                "description": "List all Notion databases",
+                "endpoint": "databases",
+                "method": "GET",
+                "params": []
+            },
+            "query_database": {
+                "description": "Query a specific Notion database",
+                "endpoint": "databases/{database_id}/query",
+                "method": "POST",
+                "params": ["database_id", "filter", "sorts"]
+            },
+            "create_page": {
+                "description": "Create a new page in Notion",
+                "endpoint": "pages",
+                "method": "POST",
+                "params": ["parent", "properties", "children"]
+            },
+            "update_page": {
+                "description": "Update an existing page in Notion",
+                "endpoint": "pages/{page_id}",
+                "method": "PATCH",
+                "params": ["page_id", "properties", "archived"]
+            }
         }
         
-        # Map the action to the correct API endpoint
-        execution_data = handle_notion_function_execution(
-            request.action, 
-            request.params
-        )
-        
-        if execution_data.get("action") == "search":
-            url = "https://api.notion.com/v1/search"
-            data = {
-                "query": execution_data.get("params", {}).get("query", ""),
-                "sort": execution_data.get("params", {}).get("sort", {"direction": "descending", "timestamp": "last_edited_time"}),
-                "filter": execution_data.get("params", {}).get("filter", {"value": "page", "property": "object"})
+        if request.action and request.action in available_endpoints:
+            return {
+                "message": "This endpoint now only provides information about API endpoints without executing actions.",
+                "requested_action": request.action,
+                "endpoint_info": available_endpoints[request.action]
             }
-            
-            async with httpx.AsyncClient() as client:
-                response = await client.post(url, headers=headers, json=data)
-                response.raise_for_status()
-                result = response.json()
-                return format_notion_api_result_for_llm(result, "search_notion")
-                
-        elif execution_data.get("action") == "list_databases" or execution_data.get("action") == "list_notion_databases":
-            url = "https://api.notion.com/v1/search"
-            data = {
-                "filter": {"value": "database", "property": "object"}
-            }
-            
-            async with httpx.AsyncClient() as client:
-                response = await client.post(url, headers=headers, json=data)
-                response.raise_for_status()
-                result = response.json()
-                return format_notion_api_result_for_llm(result, "list_notion_databases")
-                
-        elif execution_data.get("action") == "query_database":
-            database_id = execution_data.get("params", {}).get("database_id")
-            if not database_id:
-                raise HTTPException(status_code=400, detail="Database ID is required")
-                
-            url = f"https://api.notion.com/v1/databases/{database_id}/query"
-            data = {}
-            
-            # Add filter if provided
-            filter_param = execution_data.get("params", {}).get("filter")
-            if filter_param:
-                data["filter"] = filter_param
-                
-            # Add sorts if provided
-            sorts_param = execution_data.get("params", {}).get("sorts")
-            if sorts_param:
-                data["sorts"] = sorts_param
-            
-            async with httpx.AsyncClient() as client:
-                response = await client.post(url, headers=headers, json=data)
-                response.raise_for_status()
-                result = response.json()
-                return format_notion_api_result_for_llm(result, "query_notion_database")
-                
-        elif execution_data.get("action") == "create_page":
-            parent = execution_data.get("params", {}).get("parent")
-            properties = execution_data.get("params", {}).get("properties")
-            
-            if not parent or not properties:
-                raise HTTPException(status_code=400, detail="Parent and properties are required")
-                
-            url = "https://api.notion.com/v1/pages"
-            data = {
-                "parent": parent,
-                "properties": properties
-            }
-            
-            # Add children content if provided
-            children = execution_data.get("params", {}).get("children")
-            if children:
-                data["children"] = children
-                
-            async with httpx.AsyncClient() as client:
-                response = await client.post(url, headers=headers, json=data)
-                response.raise_for_status()
-                result = response.json()
-                return format_notion_api_result_for_llm(result, "create_notion_page")
-        
-        elif execution_data.get("action") == "update_page":
-            page_id = execution_data.get("params", {}).get("page_id")
-            properties = execution_data.get("params", {}).get("properties")
-            
-            if not page_id or not properties:
-                raise HTTPException(status_code=400, detail="Page ID and properties are required")
-                
-            url = f"https://api.notion.com/v1/pages/{page_id}"
-            data = {
-                "properties": properties
-            }
-            
-            # Add archived status if provided
-            if execution_data.get("params", {}).get("archived") is not None:
-                data["archived"] = execution_data.get("params", {}).get("archived")
-            
-            async with httpx.AsyncClient() as client:
-                response = await client.patch(url, headers=headers, json=data)
-                response.raise_for_status()
-                result = response.json()
-                return format_notion_api_result_for_llm(result, "update_notion_page")
-        
         else:
-            raise HTTPException(status_code=400, detail=f"Unknown action: {request.action}")
+            return {
+                "message": "This endpoint now only provides information about API endpoints without executing actions.",
+                "available_endpoints": available_endpoints
+            }
             
-    except HTTPException as e:
-        raise e
     except Exception as e:
-        logger.error(f"Error executing Notion action: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error executing Notion action: {str(e)}")
+        logger.error(f"Error handling Notion action request: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error handling Notion action request: {str(e)}")
 
 @router.get("/status", response_model=NotionStatusResponse)
 async def get_notion_status(

@@ -46,16 +46,6 @@ from open_webui.utils.payload import (
     apply_model_system_prompt_to_body,
 )
 
-# Import Notion integration utilities
-from open_webui.utils.integrations.notion import (
-    get_notion_function_tools,
-    handle_notion_function_execution,
-    format_notion_api_result_for_llm,
-)
-
-# Import Notion tools
-from open_webui.utils.openai_tools import NotionTools, execute_notion_tool
-
 router = APIRouter(prefix="/openai", tags=["openai"])
 log = logging.getLogger(__name__)
 log.setLevel(SRC_LOG_LEVELS["OPENAI"])
@@ -687,56 +677,6 @@ async def generate_chat_completion(
     if "max_tokens" in payload and "max_completion_tokens" in payload:
         del payload["max_tokens"]
 
-    # Add integration-specific tools
-    try:
-        # Check for active Notion integration
-        notion_integration = Integrations.get_user_active_integration(
-            user.id, "notion"
-        )
-        
-        if notion_integration and notion_integration.active:
-            logging.info("User has active Notion integration, adding tools")
-            # Add Notion tools to payload
-            if "tools" not in payload:
-                payload["tools"] = []
-            
-            notion_tools = get_notion_function_tools()
-            payload["tools"].extend(notion_tools)
-            
-            # Add tool_choice to force using the Notion tools when specifically requested
-            message = payload.get("messages", [{}])[-1].get("content", "").lower()
-            
-            # More specific detection for listing databases
-            if any(phrase in message for phrase in [
-                "what notion databases", "list notion database", "show notion database", 
-                "my notion database", "notion databases do i have", "notion databases i have", 
-                "access to notion database", "what databases do i have in notion"
-            ]):
-                # Force using list_notion_databases function
-                logging.info("Detected Notion database listing query, forcing list_notion_databases tool")
-                payload["tool_choice"] = {
-                    "type": "function",
-                    "function": {"name": "list_notion_databases"}
-                }
-            # Detection for Notion search
-            elif any(phrase in message for phrase in [
-                "search notion", "find in notion", "look for in notion", 
-                "search my notion for", "find notion pages about"
-            ]):
-                # Let the model decide which search parameters to use
-                logging.info("Detected Notion search query, preferring search_notion tool")
-                payload["tool_choice"] = "auto"
-            # General Notion detection
-            elif any(phrase in message for phrase in [
-                "list notion", "show notion", "notion database", "notion databases", 
-                "my notion", "in notion", "from notion", "notion workspace"
-            ]):
-                # Set tool_choice to auto but ensure Notion tools are preferred
-                logging.info("Detected general Notion query, setting tool_choice to auto")
-                payload["tool_choice"] = "auto"
-    except Exception as e:
-        logging.error(f"Error adding Notion integration tools: {str(e)}")
-
     # Store the original payload as a Python dictionary before JSON conversion
     payload_dict = payload.copy()
     
@@ -785,123 +725,19 @@ async def generate_chat_completion(
         if "text/event-stream" in r.headers.get("Content-Type", ""):
             streaming = True
             
-            # Store function responses
-            function_responses = []
-            
             # Process function calls in the response
             async def process_response_function_calls(response_line):
                 try:
-                    if '"function_call":' in response_line:
-                        response_json = json.loads(response_line)
-                        
-                        # Check for Notion function calls
-                        if ENABLE_INTEGRATIONS.value and "choices" in response_json:
-                            for choice in response_json.get("choices", []):
-                                message = choice.get("message", {})
-                                function_call = message.get("function_call")
-                                
-                                if function_call:
-                                    function_name = function_call.get("name")
-                                    if function_name and function_name.startswith("notion_") or function_name in [
-                                        "search_notion", 
-                                        "list_notion_databases", 
-                                        "query_notion_database",
-                                        "create_notion_page",
-                                        "update_notion_page"
-                                    ]:
-                                        # Log the incoming function call for debugging
-                                        logging.info(f"Processing Notion function call: {function_name}")
-                                        logging.info(f"Raw arguments: {function_call.get('arguments')}")
-                                        
-                                        # Get the raw arguments
-                                        raw_arguments = function_call.get("arguments", "{}")
-                                        
-                                        # Pass the raw arguments string directly to handle_notion_function_execution
-                                        # It will handle parsing internally to avoid issues with empty or malformed JSON
-                                        action_data = handle_notion_function_execution(
-                                            function_name=function_name,
-                                            arguments=raw_arguments
-                                        )
-                                        
-                                        logging.info(f"Mapped to action data: {action_data}")
-                                        
-                                        # Execute the action using our execute_notion_tool function
-                                        result = await execute_notion_tool(
-                                            action_data=action_data,
-                                            access_token=notion_integration.access_token,
-                                            base_url=str(request.base_url)
-                                        )
-                                        
-                                        # Process the result based on data type
-                                        formatted_result = result
-                                        logging.info(f"Using pre-formatted result for {function_name}: {str(formatted_result)[:200]}...")
-                                        
-                                        # Extract a tool call ID - use function index if available, or generate one
-                                        tool_call_id = None
-                                        # Try to extract a tool call ID from choice message
-                                        if 'message' in choice and 'function_call' in message:
-                                            function_name = function_call.get("name")
-                                            # Look for a matching tool_call in the response
-                                            if 'tool_calls' in message:
-                                                for tool_call in message.get('tool_calls', []):
-                                                    if (tool_call.get('type') == 'function' and
-                                                        tool_call.get('function', {}).get('name') == function_name):
-                                                        tool_call_id = tool_call.get('id')
-                                                        break
-                                        
-                                        # If no ID was found, generate one
-                                        if not tool_call_id:
-                                            idx = choice.get("index", "0")
-                                            response_id = None
-                                            try:
-                                                if isinstance(response_line, str):
-                                                    data = json.loads(response_line)
-                                                    if "id" in data:
-                                                        response_id = data["id"]
-                                            except:
-                                                pass
-                                                
-                                            if response_id:
-                                                tool_call_id = f"{response_id}-{idx}"
-                                            else:
-                                                tool_call_id = f"ftc_{int(time.time())}-{idx}"
-                                        
-                                        # Format the content correctly
-                                        content = formatted_result
-                                        if not isinstance(content, str):
-                                            content = json.dumps(content)
-                                        
-                                        # Add to function responses
-                                        function_responses.append({
-                                            "tool_call_id": tool_call_id,
-                                            "role": "tool",
-                                            "name": function_name,
-                                            "content": content
-                                        })
-                                        
-                                        logging.info(f"Successfully executed Notion function: {function_name}")
-                                    else:
-                                        logging.warning(f"Notion integration not active for user {user.id} but function was called")
-                                        
-                                        # Extract tool_call_id from the tool_call dictionary
-                                        tool_call_id = choice.get("index", "0")
-                                        if "id" in response_json:
-                                            tool_call_id = f"{response_json['id']}-{tool_call_id}"
-                                        else:
-                                            tool_call_id = f"ftc_{int(time.time())}-{tool_call_id}"
-                                            
-                                        function_responses.append({
-                                            "tool_call_id": tool_call_id, 
-                                            "role": "tool",
-                                            "name": function_name,
-                                            "content": json.dumps({"error": "Notion integration not connected. Please connect Notion in the Integrations page."})
-                                        })
+                    # Just return the response line as is - notion tool calling functionality removed
                     return response_line
                 except Exception as e:
                     log.error(f"Error processing function call: {str(e)}")
                     return response_line
 
             async def iterate_chunks():
+                # Initialize function_responses for this scope
+                function_responses = []
+                
                 async for chunk in r.content:
                     if chunk:
                         try:
@@ -952,105 +788,9 @@ async def generate_chat_completion(
                                 function_call = tool_call.get("function", {})
                                 function_name = function_call.get("name", "")
                                 
-                                # Check if this is a Notion function call
-                                if (function_name == "list_notion_databases" or 
-                                    function_name == "search_notion" or 
-                                    function_name == "query_notion_database" or
-                                    function_name == "create_notion_page" or
-                                    function_name == "update_notion_page"):
-                                    try:
-                                        # Get the user's Notion integration
-                                        notion_integration = Integrations.get_user_active_integration(
-                                            user.id, "notion"
-                                        )
-                                        
-                                        if notion_integration and notion_integration.active:
-                                            # Log the incoming function call for debugging
-                                            logging.info(f"Processing Notion function call: {function_name}")
-                                            logging.info(f"Raw arguments: {function_call.get('arguments')}")
-                                            
-                                            # Get the raw arguments
-                                            raw_arguments = function_call.get("arguments", "{}")
-                                            
-                                            # Pass the raw arguments string directly to handle_notion_function_execution
-                                            # It will handle parsing internally to avoid issues with empty or malformed JSON
-                                            action_data = handle_notion_function_execution(
-                                                function_name=function_name,
-                                                arguments=raw_arguments
-                                            )
-                                            
-                                            logging.info(f"Mapped to action data: {action_data}")
-                                            
-                                            # Execute the action using our execute_notion_tool function
-                                            result = await execute_notion_tool(
-                                                action_data=action_data,
-                                                access_token=notion_integration.access_token,
-                                                base_url=str(request.base_url)
-                                            )
-                                            
-                                            # Process the result based on data type
-                                            formatted_result = result
-                                            logging.info(f"Using pre-formatted result for {function_name}: {str(formatted_result)[:200]}...")
-                                            
-                                            # Extract a tool call ID - use function index if available, or generate one
-                                            tool_call_id = None
-                                            # Try to extract a tool call ID from choice message
-                                            if 'message' in choice and 'function_call' in message:
-                                                function_name = function_call.get("name")
-                                                # Look for a matching tool_call in the response
-                                                if 'tool_calls' in message:
-                                                    for tool_call in message.get('tool_calls', []):
-                                                        if (tool_call.get('type') == 'function' and
-                                                            tool_call.get('function', {}).get('name') == function_name):
-                                                            tool_call_id = tool_call.get('id')
-                                                            break
-                                            
-                                            # If no ID was found, generate one
-                                            if not tool_call_id:
-                                                idx = choice.get("index", "0")
-                                                if "id" in response_data:
-                                                    tool_call_id = f"{response_data['id']}-{idx}"
-                                                else:
-                                                    tool_call_id = f"ftc_{int(time.time())}-{idx}"
-                                            
-                                            # Format the content correctly
-                                            content = formatted_result
-                                            if not isinstance(content, str):
-                                                content = json.dumps(content)
-                                            
-                                            # Add to function responses
-                                            function_responses.append({
-                                                "tool_call_id": tool_call_id,
-                                                "role": "tool",
-                                                "name": function_name,
-                                                "content": content
-                                            })
-                                            
-                                            logging.info(f"Successfully executed Notion function: {function_name}")
-                                        else:
-                                            logging.warning(f"Notion integration not active for user {user.id} but function was called")
-                                            
-                                            # Extract tool_call_id from the tool_call dictionary
-                                            tool_call_id = tool_call.get("id", f"ftc_{int(time.time())}")
-                                            
-                                            function_responses.append({
-                                                "tool_call_id": tool_call_id,
-                                                "role": "tool",
-                                                "name": function_name,
-                                                "content": json.dumps({"error": "Notion integration not connected. Please connect Notion in the Integrations page."})
-                                            })
-                                    except Exception as e:
-                                        logging.error(f"Error processing Notion tool call: {str(e)}")
-                                        
-                                        # Extract tool_call_id from the tool_call dictionary
-                                        tool_call_id = tool_call.get("id", f"ftc_{int(time.time())}")
-                                        
-                                        function_responses.append({
-                                            "tool_call_id": tool_call_id,
-                                            "role": "tool",
-                                            "name": function_name,
-                                            "content": json.dumps({"error": f"Error processing Notion tool: {str(e)}"})
-                                        })
+                                # Notion tool calling functionality has been removed
+                                # This comment is kept as a placeholder for where the code used to be
+                                pass
                         
                         # If we have function responses, send them back to the model for a final response
                         if function_responses:
@@ -1151,33 +891,12 @@ async def generate_chat_completion(
                                     # Add a simple system message
                                     system_message = next((m for m in payload_dict.get("messages", []) if m.get("role") == "system"), None)
                                     if system_message:
-                                        simple_messages.append({"role": "system", "content": "You are a helpful assistant. Review the Notion database information and respond to the user's query."})
+                                        simple_messages.append({"role": "system", "content": "You are a helpful assistant."})
                                     
                                     # Add the user's original query
                                     user_message = next((m for m in payload_dict.get("messages", []) if m.get("role") == "user"), None)
                                     if user_message:
                                         simple_messages.append({"role": "user", "content": user_message.get("content", "")})
-                                    
-                                    # Extract the function result and add it as assistant+user interaction
-                                    function_result_content = None
-                                    for func_response in function_responses:
-                                        if func_response.get("name") == "list_notion_databases":
-                                            try:
-                                                result_json = json.loads(func_response.get("content", "{}"))
-                                                if "databases" in result_json:
-                                                    db_list = result_json.get("databases", [])
-                                                    db_text = "You have the following Notion database(s):\n"
-                                                    for db in db_list:
-                                                        db_text += f"- {db.get('title', 'Untitled')} (ID: {db.get('id', 'Unknown')})\n"
-                                                    function_result_content = db_text
-                                            except:
-                                                function_result_content = func_response.get("content", "No database information available.")
-                                    
-                                    if function_result_content:
-                                        simple_messages.append({"role": "assistant", "content": function_result_content})
-                                    
-                                    # Add a final user prompt
-                                    simple_messages.append({"role": "user", "content": "Please provide a friendly response about the database(s) I have access to in Notion."})
                                     
                                     # Create a simplified payload for the third attempt
                                     simple_payload = {
@@ -1193,12 +912,8 @@ async def generate_chat_completion(
                                             return third_response_data
                                     except Exception as third_error:
                                         logging.error(f"Third request failed: {third_error}")
-                                        # If all else fails, return a helpful message with the database info
-                                        if function_result_content:
-                                            return {"choices": [{"message": {"content": f"I found your Notion database(s):\n\n{function_result_content}"}}]}
-                                        else:
-                                            # Return the original response as a fallback
-                                            return response_data
+                                        # If all else fails, return a helpful message
+                                        return {"choices": [{"message": {"content": "I'm sorry, but I encountered an issue while processing your request. Please try again."}}]}
             except Exception as e:
                 logging.error(f"Error processing OpenAI response: {str(e)}")
                 return await r.json()  # Return the original response if there's an error

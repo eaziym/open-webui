@@ -616,156 +616,56 @@ async def notion_execute(
     action_data: Dict[str, Any],
     user: UserModel = Depends(get_verified_user),
 ):
-    """Execute a Notion action with the given parameters."""
-    try:
-        log.info(f"Executing Notion action: {action_data}")
-        
-        # Create a new database session
-        db = SessionLocal()
-        
-        try:
-            # Find the user's active Notion integration
-            integration = db.query(IntegrationModel).filter(
-                IntegrationModel.user_id == user.id,
-                IntegrationModel.integration_type == "notion",
-                IntegrationModel.active == True
-            ).first()
-            
-            if not integration:
-                raise HTTPException(
-                    status_code=404,
-                    detail="No active Notion integration found"
-                )
-            
-            # Get the access token
-            access_token = integration.access_token
-            
-            # Call the API using the access token
-            if action_data.get("action") == "search":
-                params = action_data.get("params", {})
-                query = params.get("query", "")
-                filter_obj = params.get("filter", {"value": "page", "property": "object"})
-                sort = params.get("sort", {"direction": "descending", "timestamp": "last_edited_time"})
-                
-                response = await notion_api_request(
-                    endpoint="search",
-                    access_token=access_token,
-                    method="POST",
-                    json_data={
-                        "query": query,
-                        "filter": filter_obj,
-                        "sort": sort
-                    }
-                )
-                
-                from open_webui.utils.integrations.notion import format_notion_api_result_for_llm
-                return Response(result=format_notion_api_result_for_llm(response, "search_notion"))
-                
-            elif action_data.get("action") == "list_databases":
-                response = await notion_api_request(
-                    endpoint="search",
-                    access_token=access_token,
-                    method="POST",
-                    json_data={
-                        "filter": {"value": "database", "property": "object"}
-                    }
-                )
-                
-                from open_webui.utils.integrations.notion import format_notion_api_result_for_llm
-                return Response(result=format_notion_api_result_for_llm(response, "list_notion_databases"))
-                
-            elif action_data.get("action") == "query_database":
-                params = action_data.get("params", {})
-                database_id = params.get("database_id")
-                if not database_id:
-                    raise HTTPException(status_code=400, detail="Database ID is required")
-                    
-                filter_obj = params.get("filter")
-                sorts = params.get("sorts")
-                
-                json_data = {}
-                if filter_obj:
-                    json_data["filter"] = filter_obj
-                if sorts:
-                    json_data["sorts"] = sorts
-                    
-                response = await notion_api_request(
-                    endpoint=f"databases/{database_id}/query",
-                    access_token=access_token,
-                    method="POST",
-                    json_data=json_data
-                )
-                
-                from open_webui.utils.integrations.notion import format_notion_api_result_for_llm
-                return Response(result=format_notion_api_result_for_llm(response, "query_notion_database"))
-                    
-            elif action_data.get("action") == "create_page":
-                params = action_data.get("params", {})
-                # Handle both direct params and nested page
-                parent = params.get("parent") or params.get("page", {}).get("parent")
-                properties = params.get("properties") or params.get("page", {}).get("properties")
-                children = params.get("children") or params.get("page", {}).get("children")
-                
-                if not parent or not properties:
-                    raise HTTPException(status_code=400, detail="Parent and properties are required")
-                    
-                json_data = {
-                    "parent": parent,
-                    "properties": properties
-                }
-                
-                if children:
-                    json_data["children"] = children
-                    
-                response = await notion_api_request(
-                    endpoint="pages",
-                    access_token=access_token,
-                    method="POST",
-                    json_data=json_data
-                )
-                
-                from open_webui.utils.integrations.notion import format_notion_api_result_for_llm
-                return Response(result=format_notion_api_result_for_llm(response, "create_notion_page"))
-            
-            elif action_data.get("action") == "update_page":
-                params = action_data.get("params", {})
-                page_id = params.get("page_id")
-                properties = params.get("properties")
-                archived = params.get("archived")
-                
-                if not page_id or not properties:
-                    raise HTTPException(status_code=400, detail="Page ID and properties are required")
-                    
-                json_data = {
-                    "properties": properties
-                }
-                
-                if archived is not None:
-                    json_data["archived"] = archived
-                
-                response = await notion_api_request(
-                    endpoint=f"pages/{page_id}",
-                    access_token=access_token,
-                    method="PATCH",
-                    json_data=json_data
-                )
-                
-                from open_webui.utils.integrations.notion import format_notion_api_result_for_llm
-                return Response(result=format_notion_api_result_for_llm(response, "update_notion_page"))
-            
-            else:
-                raise HTTPException(status_code=400, detail=f"Unknown action: {action_data.get('action')}")
-        finally:
-            # Always close the database session
-            db.close()
-    except HTTPException as e:
-        raise e
-    except Exception as e:
-        log.error(f"Error executing Notion action: {str(e)}")
-        log.error(f"Error details: {repr(e)}")
-        import traceback
-        log.error(f"Traceback: {traceback.format_exc()}")
-        raise HTTPException(status_code=500, detail=f"Error executing Notion action: {str(e)}")
+    """Return information about Notion API endpoints without executing actions."""
+    log.info(f"Received Notion action request: {action_data}")
+    
+    # List of available Notion API endpoints integrated with Open WebUI
+    available_endpoints = {
+        "search": {
+            "description": "Search for Notion content",
+            "endpoint": "search",
+            "method": "POST",
+            "params": ["query", "filter", "sort"]
+        },
+        "list_databases": {
+            "description": "List all Notion databases",
+            "endpoint": "search with database filter",
+            "method": "POST",
+            "params": []
+        },
+        "query_database": {
+            "description": "Query a specific Notion database",
+            "endpoint": "databases/{database_id}/query",
+            "method": "POST",
+            "params": ["database_id", "filter", "sorts"]
+        },
+        "create_page": {
+            "description": "Create a new page in Notion",
+            "endpoint": "pages",
+            "method": "POST",
+            "params": ["parent", "properties", "children"]
+        },
+        "update_page": {
+            "description": "Update an existing page in Notion",
+            "endpoint": "pages/{page_id}",
+            "method": "PATCH",
+            "params": ["page_id", "properties", "archived"]
+        }
+    }
+    
+    action = action_data.get("action", "")
+    
+    if action and action in available_endpoints:
+        return Response(result={
+            "message": "This endpoint now only provides information about API endpoints without executing actions.",
+            "requested_action": action,
+            "endpoint_info": available_endpoints[action]
+        })
+    else:
+        return Response(result={
+            "message": "This endpoint now only provides information about API endpoints without executing actions.",
+            "available_endpoints": available_endpoints
+        })
 
 
 @router.delete(
