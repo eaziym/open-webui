@@ -79,10 +79,7 @@ from open_webui.routers import (
 )
 # Import the router from integrations.py for the main integrations endpoints
 from open_webui.routers.integrations import router as integrations_router
-# Import router from the integrations package for properly structured sub-routes
-from open_webui.routers.integrations import router as integrations_package_router
-# Import our new Notion API router
-from open_webui.notion_api import router as notion_api_router
+
 
 from open_webui.routers.retrieval import (
     get_embedding_function,
@@ -363,8 +360,8 @@ from open_webui.utils.oauth import OAuthManager
 from open_webui.utils.security_headers import SecurityHeadersMiddleware
 
 from open_webui.tasks import stop_task, list_tasks  # Import from tasks.py
-from open_webui.routers.integrations import notion
-from open_webui.notion_api import router as notion_api_router  # Import the new Notion API router
+from open_webui.routers.ollama import router as ollama_router
+from open_webui.routers.openai import router as openai_router
 
 
 if SAFE_MODE:
@@ -891,8 +888,8 @@ app.add_middleware(
 app.mount("/ws", socket_app)
 
 
-app.include_router(ollama.router, prefix="/ollama", tags=["ollama"])
-app.include_router(openai.router, prefix="/openai", tags=["openai"])
+app.include_router(ollama_router, prefix="/ollama", tags=["ollama"])
+app.include_router(openai_router, prefix="/openai", tags=["openai"])
 
 
 app.include_router(pipelines.router, prefix="/api/v1/pipelines", tags=["pipelines"])
@@ -916,10 +913,6 @@ app.include_router(knowledge.router, prefix="/api/v1/knowledge", tags=["knowledg
 app.include_router(prompts.router, prefix="/api/v1/prompts", tags=["prompts"])
 app.include_router(tools.router, prefix="/api/v1/tools", tags=["tools"])
 app.include_router(integrations_router, prefix="/api/v1/integrations", tags=["integrations"])
-app.include_router(integrations_package_router, prefix="/api/v1/integrations-pkg", tags=["integrations-pkg"])
-
-# Include the Notion API router
-app.include_router(notion_api_router, prefix="/api/v1/notion", tags=["notion-api"], responses={404: {"description": "Not found"}})
 
 app.include_router(memories.router, prefix="/api/v1/memories", tags=["memories"])
 app.include_router(folders.router, prefix="/api/v1/folders", tags=["folders"])

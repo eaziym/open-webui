@@ -537,4 +537,689 @@ async def get_notion_databases(
         raise e
     except Exception as e:
         logger.error(f"Error getting Notion databases: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error getting Notion databases: {str(e)}") 
+        raise HTTPException(status_code=500, detail=f"Error getting Notion databases: {str(e)}")
+
+# Request and response models for new endpoints
+class QueryDatabaseRequest(BaseModel):
+    filter: Optional[Dict[str, Any]] = None
+    sorts: Optional[List[Dict[str, Any]]] = None
+    page_size: Optional[int] = 100
+    start_cursor: Optional[str] = None
+
+class CreatePageRequest(BaseModel):
+    parent: Dict[str, Any]  # Required: database_id or page_id
+    properties: Dict[str, Any]  # Required
+    children: Optional[List[Dict[str, Any]]] = None  # Optional content blocks
+    icon: Optional[Dict[str, Any]] = None
+    cover: Optional[Dict[str, Any]] = None
+
+class UpdatePageRequest(BaseModel):
+    properties: Dict[str, Any]
+    archived: Optional[bool] = None
+
+class CommentRequest(BaseModel):
+    parent: Dict[str, str]  # Required: page_id or block_id
+    rich_text: List[Dict[str, Any]]  # Required: comment content
+
+class BlockRequest(BaseModel):
+    children: List[Dict[str, Any]]
+
+class UpdateBlockRequest(BaseModel):
+    block_data: Dict[str, Any]
+
+class SearchRequest(BaseModel):
+    query: Optional[str] = None
+    sort: Optional[Dict[str, Any]] = None
+    filter: Optional[Dict[str, Any]] = None
+    page_size: Optional[int] = 100
+    start_cursor: Optional[str] = None
+
+# HELPER FUNCTION: Get integration access token
+async def get_notion_access_token(user: User) -> str:
+    """Helper function to get the user's Notion access token"""
+    with get_db() as db:
+        integration = db.query(IntegrationConnection).filter(
+            IntegrationConnection.user_id == user.id,
+            IntegrationConnection.integration_type == "notion",
+            IntegrationConnection.active == True
+        ).first()
+        
+        if not integration:
+            raise HTTPException(status_code=400, detail="No active Notion integration found")
+        
+        return integration.access_token
+
+# DATABASE ENDPOINTS
+@router.post("/databases/{database_id}/query")
+async def query_notion_database(
+    database_id: str,
+    query_request: QueryDatabaseRequest,
+    user: User = Depends(get_current_user),
+):
+    """
+    Query a specific Notion database with filters and sorting options
+    """
+    try:
+        logger.info(f"Querying Notion database {database_id} for user: {user.id}")
+        access_token = await get_notion_access_token(user)
+        
+        # Prepare the request data
+        data = {}
+        if query_request.filter:
+            data["filter"] = query_request.filter
+        if query_request.sorts:
+            data["sorts"] = query_request.sorts
+        if query_request.page_size:
+            data["page_size"] = query_request.page_size
+        if query_request.start_cursor:
+            data["start_cursor"] = query_request.start_cursor
+            
+        # Make the API request
+        result = await notion_api_request(
+            f"databases/{database_id}/query",
+            access_token=access_token,
+            method="POST",
+            json_data=data
+        )
+        
+        if result.get("error"):
+            raise HTTPException(
+                status_code=result.get("status", 500),
+                detail=f"Error querying Notion database: {result.get('message')}"
+            )
+            
+        return result
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error querying Notion database: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error querying Notion database: {str(e)}")
+
+@router.get("/databases/{database_id}")
+async def get_notion_database(
+    database_id: str,
+    user: User = Depends(get_current_user),
+):
+    """
+    Retrieve a specific Notion database by ID
+    """
+    try:
+        logger.info(f"Getting Notion database {database_id} for user: {user.id}")
+        access_token = await get_notion_access_token(user)
+        
+        # Make the API request
+        result = await notion_api_request(
+            f"databases/{database_id}",
+            access_token=access_token
+        )
+        
+        if result.get("error"):
+            raise HTTPException(
+                status_code=result.get("status", 500),
+                detail=f"Error retrieving Notion database: {result.get('message')}"
+            )
+            
+        return result
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error retrieving Notion database: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error retrieving Notion database: {str(e)}")
+
+# PAGE ENDPOINTS
+@router.post("/pages")
+async def create_notion_page(
+    page_request: CreatePageRequest,
+    user: User = Depends(get_current_user),
+):
+    """
+    Create a new page in Notion
+    """
+    try:
+        logger.info(f"Creating new Notion page for user: {user.id}")
+        access_token = await get_notion_access_token(user)
+        
+        # Validate required fields
+        if not page_request.parent or not page_request.properties:
+            raise HTTPException(status_code=400, detail="Missing required fields: parent and properties")
+        
+        # Prepare the request data
+        data = {
+            "parent": page_request.parent,
+            "properties": page_request.properties
+        }
+        
+        if page_request.children:
+            data["children"] = page_request.children
+        if page_request.icon:
+            data["icon"] = page_request.icon
+        if page_request.cover:
+            data["cover"] = page_request.cover
+            
+        # Make the API request
+        result = await notion_api_request(
+            "pages",
+            access_token=access_token,
+            method="POST",
+            json_data=data
+        )
+        
+        if result.get("error"):
+            raise HTTPException(
+                status_code=result.get("status", 500),
+                detail=f"Error creating Notion page: {result.get('message')}"
+            )
+            
+        return result
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error creating Notion page: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error creating Notion page: {str(e)}")
+
+@router.get("/pages/{page_id}")
+async def get_notion_page(
+    page_id: str,
+    user: User = Depends(get_current_user),
+):
+    """
+    Retrieve a specific Notion page by ID
+    """
+    try:
+        logger.info(f"Getting Notion page {page_id} for user: {user.id}")
+        access_token = await get_notion_access_token(user)
+        
+        # Make the API request
+        result = await notion_api_request(
+            f"pages/{page_id}",
+            access_token=access_token
+        )
+        
+        if result.get("error"):
+            raise HTTPException(
+                status_code=result.get("status", 500),
+                detail=f"Error retrieving Notion page: {result.get('message')}"
+            )
+            
+        return result
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error retrieving Notion page: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error retrieving Notion page: {str(e)}")
+
+@router.patch("/pages/{page_id}")
+async def update_notion_page(
+    page_id: str,
+    update_request: UpdatePageRequest,
+    user: User = Depends(get_current_user),
+):
+    """
+    Update an existing Notion page
+    """
+    try:
+        logger.info(f"Updating Notion page {page_id} for user: {user.id}")
+        access_token = await get_notion_access_token(user)
+        
+        # Prepare the request data
+        data = {"properties": update_request.properties}
+        if update_request.archived is not None:
+            data["archived"] = update_request.archived
+            
+        # Make the API request
+        result = await notion_api_request(
+            f"pages/{page_id}",
+            access_token=access_token,
+            method="PATCH",
+            json_data=data
+        )
+        
+        if result.get("error"):
+            raise HTTPException(
+                status_code=result.get("status", 500),
+                detail=f"Error updating Notion page: {result.get('message')}"
+            )
+            
+        return result
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error updating Notion page: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error updating Notion page: {str(e)}")
+
+@router.get("/pages/{page_id}/properties/{property_id}")
+async def get_page_property(
+    page_id: str,
+    property_id: str,
+    user: User = Depends(get_current_user),
+):
+    """
+    Retrieve a specific property of a Notion page
+    """
+    try:
+        logger.info(f"Getting property {property_id} of page {page_id} for user: {user.id}")
+        access_token = await get_notion_access_token(user)
+        
+        # Make the API request
+        result = await notion_api_request(
+            f"pages/{page_id}/properties/{property_id}",
+            access_token=access_token
+        )
+        
+        if result.get("error"):
+            raise HTTPException(
+                status_code=result.get("status", 500),
+                detail=f"Error retrieving page property: {result.get('message')}"
+            )
+            
+        return result
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error retrieving page property: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error retrieving page property: {str(e)}")
+
+# BLOCK ENDPOINTS
+@router.get("/blocks/{block_id}")
+async def get_notion_block(
+    block_id: str,
+    user: User = Depends(get_current_user),
+):
+    """
+    Retrieve a specific Notion block by ID
+    """
+    try:
+        logger.info(f"Getting Notion block {block_id} for user: {user.id}")
+        access_token = await get_notion_access_token(user)
+        
+        # Make the API request
+        result = await notion_api_request(
+            f"blocks/{block_id}",
+            access_token=access_token
+        )
+        
+        if result.get("error"):
+            raise HTTPException(
+                status_code=result.get("status", 500),
+                detail=f"Error retrieving Notion block: {result.get('message')}"
+            )
+            
+        return result
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error retrieving Notion block: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error retrieving Notion block: {str(e)}")
+
+@router.get("/blocks/{block_id}/children")
+async def get_block_children(
+    block_id: str,
+    start_cursor: Optional[str] = None,
+    page_size: Optional[int] = 100,
+    user: User = Depends(get_current_user),
+):
+    """
+    Retrieve the children of a specific Notion block
+    """
+    try:
+        logger.info(f"Getting children of block {block_id} for user: {user.id}")
+        access_token = await get_notion_access_token(user)
+        
+        # Prepare parameters
+        params = {}
+        if start_cursor:
+            params["start_cursor"] = start_cursor
+        if page_size:
+            params["page_size"] = page_size
+            
+        # Make the API request
+        result = await notion_api_request(
+            f"blocks/{block_id}/children",
+            access_token=access_token,
+            params=params
+        )
+        
+        if result.get("error"):
+            raise HTTPException(
+                status_code=result.get("status", 500),
+                detail=f"Error retrieving block children: {result.get('message')}"
+            )
+            
+        return result
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error retrieving block children: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error retrieving block children: {str(e)}")
+
+@router.patch("/blocks/{block_id}/children")
+async def append_block_children(
+    block_id: str,
+    block_request: BlockRequest,
+    user: User = Depends(get_current_user),
+):
+    """
+    Append new children blocks to a specific Notion block
+    """
+    try:
+        logger.info(f"Appending children to block {block_id} for user: {user.id}")
+        access_token = await get_notion_access_token(user)
+        
+        # Validate required fields
+        if not block_request.children:
+            raise HTTPException(status_code=400, detail="Missing required field: children")
+            
+        # Make the API request
+        result = await notion_api_request(
+            f"blocks/{block_id}/children",
+            access_token=access_token,
+            method="PATCH",
+            json_data={"children": block_request.children}
+        )
+        
+        if result.get("error"):
+            raise HTTPException(
+                status_code=result.get("status", 500),
+                detail=f"Error appending block children: {result.get('message')}"
+            )
+            
+        return result
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error appending block children: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error appending block children: {str(e)}")
+
+@router.patch("/blocks/{block_id}")
+async def update_notion_block(
+    block_id: str,
+    update_request: UpdateBlockRequest,
+    user: User = Depends(get_current_user),
+):
+    """
+    Update a specific Notion block
+    """
+    try:
+        logger.info(f"Updating block {block_id} for user: {user.id}")
+        access_token = await get_notion_access_token(user)
+        
+        # Validate request
+        if not update_request.block_data:
+            raise HTTPException(status_code=400, detail="Missing required field: block_data")
+            
+        # Make the API request
+        result = await notion_api_request(
+            f"blocks/{block_id}",
+            access_token=access_token,
+            method="PATCH",
+            json_data=update_request.block_data
+        )
+        
+        if result.get("error"):
+            raise HTTPException(
+                status_code=result.get("status", 500),
+                detail=f"Error updating block: {result.get('message')}"
+            )
+            
+        return result
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error updating block: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error updating block: {str(e)}")
+
+@router.delete("/blocks/{block_id}")
+async def delete_notion_block(
+    block_id: str,
+    user: User = Depends(get_current_user),
+):
+    """
+    Delete a specific Notion block (sets the archived property to true)
+    """
+    try:
+        logger.info(f"Deleting block {block_id} for user: {user.id}")
+        access_token = await get_notion_access_token(user)
+        
+        # Make the API request
+        result = await notion_api_request(
+            f"blocks/{block_id}",
+            access_token=access_token,
+            method="DELETE"
+        )
+        
+        if result.get("error"):
+            raise HTTPException(
+                status_code=result.get("status", 500),
+                detail=f"Error deleting block: {result.get('message')}"
+            )
+            
+        return result
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error deleting block: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error deleting block: {str(e)}")
+
+# SEARCH ENDPOINT
+@router.post("/search")
+async def search_notion(
+    search_request: SearchRequest,
+    user: User = Depends(get_current_user),
+):
+    """
+    Search for Notion content (pages and databases)
+    """
+    try:
+        logger.info(f"Searching Notion content for user: {user.id}")
+        access_token = await get_notion_access_token(user)
+        
+        # Prepare the request data
+        data = {}
+        if search_request.query:
+            data["query"] = search_request.query
+        if search_request.sort:
+            data["sort"] = search_request.sort
+        if search_request.filter:
+            data["filter"] = search_request.filter
+        if search_request.page_size:
+            data["page_size"] = search_request.page_size
+        if search_request.start_cursor:
+            data["start_cursor"] = search_request.start_cursor
+            
+        # Make the API request
+        result = await notion_api_request(
+            "search",
+            access_token=access_token,
+            method="POST",
+            json_data=data
+        )
+        
+        if result.get("error"):
+            raise HTTPException(
+                status_code=result.get("status", 500),
+                detail=f"Error searching Notion: {result.get('message')}"
+            )
+            
+        return result
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error searching Notion: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error searching Notion: {str(e)}")
+
+# USER ENDPOINTS
+@router.get("/users")
+async def list_notion_users(
+    user: User = Depends(get_current_user),
+):
+    """
+    List all users in the current Notion workspace
+    """
+    try:
+        logger.info(f"Listing Notion users for user: {user.id}")
+        access_token = await get_notion_access_token(user)
+        
+        # Make the API request
+        result = await notion_api_request(
+            "users",
+            access_token=access_token
+        )
+        
+        if result.get("error"):
+            raise HTTPException(
+                status_code=result.get("status", 500),
+                detail=f"Error listing Notion users: {result.get('message')}"
+            )
+            
+        return result
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error listing Notion users: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error listing Notion users: {str(e)}")
+
+@router.get("/users/{user_id}")
+async def get_notion_user(
+    notion_user_id: str,
+    user: User = Depends(get_current_user),
+):
+    """
+    Retrieve a specific Notion user by ID
+    """
+    try:
+        logger.info(f"Getting Notion user {notion_user_id} for user: {user.id}")
+        access_token = await get_notion_access_token(user)
+        
+        # Make the API request
+        result = await notion_api_request(
+            f"users/{notion_user_id}",
+            access_token=access_token
+        )
+        
+        if result.get("error"):
+            raise HTTPException(
+                status_code=result.get("status", 500),
+                detail=f"Error retrieving Notion user: {result.get('message')}"
+            )
+            
+        return result
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error retrieving Notion user: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error retrieving Notion user: {str(e)}")
+
+@router.get("/users/me")
+async def get_my_notion_user(
+    user: User = Depends(get_current_user),
+):
+    """
+    Retrieve the current bot user in Notion
+    """
+    try:
+        logger.info(f"Getting bot user for user: {user.id}")
+        access_token = await get_notion_access_token(user)
+        
+        # Make the API request
+        result = await notion_api_request(
+            "users/me",
+            access_token=access_token
+        )
+        
+        if result.get("error"):
+            raise HTTPException(
+                status_code=result.get("status", 500),
+                detail=f"Error retrieving bot user: {result.get('message')}"
+            )
+            
+        return result
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error retrieving bot user: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error retrieving bot user: {str(e)}")
+
+# COMMENT ENDPOINTS
+@router.post("/comments")
+async def create_notion_comment(
+    comment_request: CommentRequest,
+    user: User = Depends(get_current_user),
+):
+    """
+    Create a new comment in Notion
+    """
+    try:
+        logger.info(f"Creating new Notion comment for user: {user.id}")
+        access_token = await get_notion_access_token(user)
+        
+        # Validate required fields
+        if not comment_request.parent or not comment_request.rich_text:
+            raise HTTPException(status_code=400, detail="Missing required fields: parent and rich_text")
+            
+        # Make the API request
+        result = await notion_api_request(
+            "comments",
+            access_token=access_token,
+            method="POST",
+            json_data={
+                "parent": comment_request.parent,
+                "rich_text": comment_request.rich_text
+            }
+        )
+        
+        if result.get("error"):
+            raise HTTPException(
+                status_code=result.get("status", 500),
+                detail=f"Error creating Notion comment: {result.get('message')}"
+            )
+            
+        return result
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error creating Notion comment: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error creating Notion comment: {str(e)}")
+
+@router.get("/comments")
+async def get_notion_comments(
+    block_id: Optional[str] = None,
+    page_id: Optional[str] = None,
+    user: User = Depends(get_current_user),
+):
+    """
+    Retrieve comments for a block or page in Notion
+    """
+    try:
+        logger.info(f"Getting Notion comments for user: {user.id}")
+        access_token = await get_notion_access_token(user)
+        
+        # Validate parameters
+        if not block_id and not page_id:
+            raise HTTPException(status_code=400, detail="At least one of block_id or page_id is required")
+            
+        # Prepare parameters
+        params = {}
+        if block_id:
+            params["block_id"] = block_id
+        if page_id:
+            params["page_id"] = page_id
+            
+        # Make the API request
+        result = await notion_api_request(
+            "comments",
+            access_token=access_token,
+            params=params
+        )
+        
+        if result.get("error"):
+            raise HTTPException(
+                status_code=result.get("status", 500),
+                detail=f"Error retrieving Notion comments: {result.get('message')}"
+            )
+            
+        return result
+    except HTTPException as e:
+        raise e
+    except Exception as e:
+        logger.error(f"Error retrieving Notion comments: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error retrieving Notion comments: {str(e)}") 
